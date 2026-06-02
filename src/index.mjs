@@ -318,7 +318,10 @@ export default {
     // Collapse repeated slashes and strip a trailing slash so /api/forecast/
     // and //api/refresh route the same as the canonical paths.
     const p = url.pathname.replace(/\/{2,}/g, "/").replace(/(.)\/+$/, "$1");
-   const q = url.searchParams;
+    const q = url.searchParams;
+
+    if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+    try {
 
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     try {
