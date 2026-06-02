@@ -266,10 +266,11 @@ async function queryGreenmix(env, source, params) {
 }
 
 // --- response formatting ----------------------------------------------------
+const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET", "Access-Control-Allow-Headers": "*" };
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "max-age=900" },
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "max-age=900", ...CORS },
   });
 
 function csv(rows) {
