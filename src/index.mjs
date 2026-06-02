@@ -360,8 +360,14 @@ export default {
 
   // Cron runs one source per invocation so neither can approach Cloudflare's
   // per-invocation fetch cap, regardless of how Ned paginates. Times are UTC.
-  // :00 triggers -> forecast, :30 triggers -> realized.
+  // :00 triggers -> forecast, :30 triggers -> realized, monthly -> deep
+  // realized sweep (~32 days back) to overwrite any values that were still
+  // provisional within Ned's revision windows.
   async scheduled(event, env, ctx) {
+    if (event.cron === "0 12 1 * *") {
+      ctx.waitUntil(fetchAndStore(env, "realized", { daysBack: 32, daysFwd: 1 }));
+      return;
+    }
     const realizedCrons = ["30 13 * * *", "30 18 * * *"];
     const source = realizedCrons.includes(event.cron) ? "realized" : "forecast";
     ctx.waitUntil(fetchAndStore(env, source));
