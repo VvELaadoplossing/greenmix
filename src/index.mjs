@@ -94,7 +94,10 @@ async function fetchType(env, typeId, classification, fromDate, toDate) {
     url.searchParams.set("activity", "1");              // providing
     url.searchParams.set("validfrom[after]", fromDate);
     url.searchParams.set("validfrom[strictly_before]", toDate);
-    url.searchParams.set("itemsPerPage", "200");
+    // Large page -> ~1 fetch per type. Cloudflare caps outbound fetches per
+    // Worker invocation (50 on the free plan), so keeping the fetch count low
+    // is what stops "Too many subrequests". Ned clamps to its own max if lower.
+    url.searchParams.set("itemsPerPage", "2000");
     url.searchParams.set("page", String(page));
 
     const res = await fetch(url.toString(), {
@@ -294,6 +297,10 @@ const HELP = `Greenmix (Ned.nl) — read-only API
   GET /api/refresh?token=...   run the collector now (needs REFRESH_TOKEN)
                                &days_back=N&days_fwd=N to widen the window
                                &source=forecast|realized|both (default both)
+                               On the free plan, if "both" ever returns a
+                               "Too many subrequests" error over a very wide
+                               window, call source=forecast and source=realized
+                               separately (each is its own invocation).
 
   Query params for the data routes:
     ?from=ISO  ?to=ISO  ?all=1  ?limit=N  ?type=1,2,20
@@ -307,7 +314,9 @@ const HELP = `Greenmix (Ned.nl) — read-only API
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const p = url.pathname;
+    // Collapse repeated slashes and strip a trailing slash so /api/forecast/
+    // and //api/refresh route the same as the canonical paths.
+    const p = url.pathname.replace(/\/{2,}/g, "/").replace(/(.)\/+$/, "$1");
     const q = url.searchParams;
 
     try {
@@ -349,13 +358,12 @@ export default {
     }
   },
 
-  // Twice-daily cron (UTC), aligned with the epexspot worker.
+  // Cron runs one source per invocation so neither can approach Cloudflare's
+  // per-invocation fetch cap, regardless of how Ned paginates. Times are UTC.
+  // :00 triggers -> forecast, :30 triggers -> realized.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      (async () => {
-        await fetchAndStore(env, "forecast");
-        await fetchAndStore(env, "realized");
-      })()
-    );
+    const realizedCrons = ["30 13 * * *", "30 18 * * *"];
+    const source = realizedCrons.includes(event.cron) ? "realized" : "forecast";
+    ctx.waitUntil(fetchAndStore(env, source));
   },
 };
