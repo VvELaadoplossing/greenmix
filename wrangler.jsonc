@@ -15,9 +15,11 @@
   // Cloudflare cron triggers are always UTC. Same hours as epexspot (13:00 +
   // 18:00 UTC, after publish, with the second as a backup). The :30 triggers
   // run the realized pull in a separate invocation from the :00 forecast pull,
-  // so neither approaches Cloudflare's per-invocation fetch cap.
+  // so neither approaches Cloudflare's per-invocation fetch cap. The monthly
+  // trigger does a deep realized sweep (~32 days back) to capture late
+  // revisions, e.g. Waste Power's 28-day rolling window.
   "triggers": {
-    "crons": ["0 13 * * *", "30 13 * * *", "0 18 * * *", "30 18 * * *"]
+    "crons": ["0 13 * * *", "30 13 * * *", "0 18 * * *", "30 18 * * *", "0 12 1 * *"]
   },
 
   "observability": { "enabled": true }
