@@ -133,12 +133,20 @@ window. The daily realized window is short, so to re-pull older revisions run
 ## Schedule (and why it's in UTC)
 
 ```
-"crons": ["0 13 * * *", "0 18 * * *"]   // 13:00 and 18:00 UTC
+"crons": ["0 13 * * *", "30 13 * * *", "0 18 * * *", "30 18 * * *"]  // UTC
 ```
 
-Cloudflare cron triggers **must** be UTC. These are the same times as the
-epexspot worker, so the two refresh together. Add more lines if you want fresher
-forecasts during the day.
+Cloudflare cron triggers **must** be UTC. The hours match the epexspot worker
+(13:00 + an 18:00 backup, after publish). The **:00** triggers run the forecast
+pull and the **:30** triggers run the realized pull, in *separate invocations* —
+this keeps each run well under Cloudflare's per-invocation outbound-fetch cap
+(50 on the free plan). The worker requests a large `itemsPerPage` so each type
+is a single fetch, so a one-source run is ~13 fetches.
+
+If you ever run a manual `/api/refresh` with `source=both` over a very wide
+window on the free plan and hit "Too many subrequests", just call
+`?source=forecast` and `?source=realized` separately, or upgrade to Workers
+Paid (1000 fetches/invocation).
 
 ## How it lines up with epexspot
 

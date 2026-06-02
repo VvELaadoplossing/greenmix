@@ -12,11 +12,12 @@
     }
   ],
 
-  // Cloudflare cron triggers are always UTC. Same times as epexspot so the two
-  // workers refresh together: 13:00 UTC (after the data is published) + an
-  // 18:00 UTC backup. Add more lines here if you want fresher forecasts.
+  // Cloudflare cron triggers are always UTC. Same hours as epexspot (13:00 +
+  // 18:00 UTC, after publish, with the second as a backup). The :30 triggers
+  // run the realized pull in a separate invocation from the :00 forecast pull,
+  // so neither approaches Cloudflare's per-invocation fetch cap.
   "triggers": {
-    "crons": ["0 13 * * *", "0 18 * * *"]
+    "crons": ["0 13 * * *", "30 13 * * *", "0 18 * * *", "30 18 * * *"]
   },
 
   "observability": { "enabled": true }
