@@ -1,0 +1,23 @@
+{
+  // Greenmix (Ned.nl) worker — mirrors the epexspot wrangler.jsonc.
+  "name": "greenmix",
+  "main": "src/index.mjs",
+  "compatibility_date": "2025-11-01",
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "greenmix",
+      "database_id": "af605300-b911-40fe-9d84-7cae2f9f7c32"
+    }
+  ],
+
+  // Cloudflare cron triggers are always UTC. Same times as epexspot so the two
+  // workers refresh together: 13:00 UTC (after the data is published) + an
+  // 18:00 UTC backup. Add more lines here if you want fresher forecasts.
+  "triggers": {
+    "crons": ["0 13 * * *", "0 18 * * *"]
+  },
+
+  "observability": { "enabled": true }
+}
