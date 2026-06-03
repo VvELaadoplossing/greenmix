@@ -266,14 +266,19 @@ async function queryGreenmix(env, source, params) {
 }
 
 // --- response formatting ----------------------------------------------------
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, OPTIONS",
+  "access-control-allow-headers": "Content-Type",
+};
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "max-age=900" },
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "max-age=900", ...CORS },
   });
 
 function csv(rows) {
-  if (!rows.length) return new Response("", { headers: { "content-type": "text/csv; charset=utf-8" } });
+  if (!rows.length) return new Response("", { headers: { "content-type": "text/csv; charset=utf-8", ...CORS } });
   const cols = Object.keys(rows[0]);
   const esc = (v) => {
     if (v === null || v === undefined) return "";
@@ -282,7 +287,7 @@ function csv(rows) {
   };
   const body = [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
   return new Response(body, {
-    headers: { "content-type": "text/csv; charset=utf-8", "cache-control": "max-age=900" },
+    headers: { "content-type": "text/csv; charset=utf-8", "cache-control": "max-age=900", ...CORS },
   });
 }
 
@@ -494,8 +499,12 @@ export default {
     const url = new URL(request.url);
     // Collapse repeated slashes and strip a trailing slash so /api/forecast/
     // and //api/refresh route the same as the canonical paths.
-    const p = url.pathname.replace(/\/{2,}/g, "/").replace(/(.)\/+$/, "$1");
+  const p = url.pathname.replace(/\/{2,}/g, "/").replace(/(.)\/+$/, "$1");
     const q = url.searchParams;
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: CORS });
+    }
 
     try {
       if (p === "/" || p === "") {
