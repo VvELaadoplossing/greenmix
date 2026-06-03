@@ -288,6 +288,8 @@ function csv(rows) {
 
 const HELP = `Greenmix (Ned.nl) — read-only API
 
+  GET /docs                    human-friendly HTML documentation (start here)
+
   GET /api/forecast            JSON, defaults to last 14 days
   GET /api/forecast.csv        same as CSV
   GET /api/realized            JSON (Ned 'current' / actuals)
@@ -311,6 +313,182 @@ const HELP = `Greenmix (Ned.nl) — read-only API
   definition (nuclear is NOT green).
 `;
 
+// --- HTML docs page ---------------------------------------------------------
+// A small, self-contained documentation page served at /docs, in the same
+// spirit as the epexspot worker's /docs. The generation-type table is built
+// from TYPES above so the page can never drift out of sync with the code.
+const escHtml = (s) =>
+  String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function typeRows() {
+  const note = { 21: " *", 26: " **", 27: " ***" };
+  return TYPES.map((t) => {
+    const label = t.green === true ? "Yes" : t.green === false ? "No" : "—";
+    const cls = t.green === true ? "yes" : t.green === false ? "no" : "na";
+    return (
+      `<tr><td><code>${t.id}</code></td>` +
+      `<td>${escHtml(t.name)}${note[t.id] || ""}</td>` +
+      `<td class="g-${cls}">${label}</td></tr>`
+    );
+  }).join("\n");
+}
+
+export function docsHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Greenmix API · Netherlands</title>
+<style>
+  :root {
+    --fg: #1c2024; --muted: #5b6470; --line: #e3e7ec; --bg: #ffffff;
+    --code-bg: #f5f7f9; --accent: #1f8a4c; --accent-bg: #eaf6ee; --link: #0a6cce;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e6e9ed; --muted: #9aa4b1; --line: #2a3038; --bg: #14171b;
+      --code-bg: #1c2127; --accent: #4cc47e; --accent-bg: #16271d; --link: #69b4ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; letter-spacing: -0.01em; }
+  h2 { font-size: 1.25rem; margin: 2.4rem 0 .6rem; padding-top: .4rem; border-top: 1px solid var(--line); }
+  p { margin: .6rem 0; }
+  .lede { color: var(--muted); font-size: 1.05rem; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .9em; background: var(--code-bg); padding: .1em .4em; border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 1rem; overflow-x: auto; font-size: .88rem; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .94rem; }
+  th, td { text-align: left; padding: .5rem .65rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; }
+  tbody tr:hover { background: var(--code-bg); }
+  .g-yes { color: var(--accent); font-weight: 600; }
+  .g-no { color: var(--muted); }
+  .g-na { color: var(--muted); }
+  ul { padding-left: 1.2rem; }
+  li { margin: .25rem 0; }
+  .note { color: var(--muted); font-size: .9rem; }
+  .pill {
+    display: inline-block; background: var(--accent-bg); color: var(--accent);
+    border-radius: 999px; padding: .1rem .6rem; font-size: .8rem; font-weight: 600;
+  }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+  <p><span class="pill">read-only · no key needed</span></p>
+  <h1>Greenmix API</h1>
+  <p class="lede">The Dutch electricity generation mix from Ned.nl, served as JSON or CSV.</p>
+
+  <p>A small, public, read-only API and the sibling of the EPEX SPOT price API.
+  It stores raw Ned.nl facts only. The single opinion baked in is the
+  <strong>green / non-green</strong> flag, which follows
+  <a href="https://ned.nl/nl/definities">Ned's own renewable definition</a> —
+  not a configurable percentage table. Nuclear is <em>not</em> counted as green.</p>
+
+  <h2>What you get back</h2>
+  <p>The data routes return one row per generation type per 15-minute slot:</p>
+  <table>
+    <thead><tr><th>Field</th><th>Example</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>type_id</code> / <code>type_name</code></td><td><code>2</code> / <code>Solar</code></td><td>Ned generation type (see the table below).</td></tr>
+      <tr><td><code>is_green</code></td><td><code>true</code></td><td>Whether this type counts as green under Ned's definition.</td></tr>
+      <tr><td><code>ts_utc</code></td><td><code>2026-05-27T12:00:00Z</code></td><td>Slot start in UTC. Part of the unique key, so rows never duplicate.</td></tr>
+      <tr><td><code>ts_local</code></td><td><code>2026-05-27T14:00:00+02:00</code></td><td>The same moment in Amsterdam time, with the right summer/winter offset.</td></tr>
+      <tr><td><code>ts_utc_end</code></td><td><code>2026-05-27T12:15:00Z</code></td><td>Slot end in UTC.</td></tr>
+      <tr><td><code>volume_kwh</code></td><td><code>123456</code></td><td>Energy in this slot, in kWh.</td></tr>
+      <tr><td><code>capacity_kw</code></td><td><code>987654</code></td><td>Available capacity, in kW.</td></tr>
+      <tr><td><code>percentage</code></td><td><code>0.18</code></td><td>Ned's share value for the type.</td></tr>
+      <tr><td><code>emission_kg</code> / <code>emissionfactor</code></td><td><code>0.31</code></td><td>CO₂ in kg, and the factor in kg/kWh.</td></tr>
+    </tbody>
+  </table>
+  <p class="note">The <code>/api/greenmix</code> route is different: it returns one row per slot with
+  <code>green_kwh</code>, <code>nongreen_kwh</code>, <code>total_kwh</code> and <code>green_share</code> (0–1).</p>
+
+  <h2>Generation types</h2>
+  <p>The catalogue of Ned types and whether each one counts as green:</p>
+  <table>
+    <thead><tr><th>ID</th><th>Type</th><th>Counts as green?</th></tr></thead>
+    <tbody>
+${typeRows()}
+    </tbody>
+  </table>
+  <p class="note">
+    * Waste Power is roughly 50% biogenic; it is currently counted as
+    <strong>non-green</strong> to match the original sheet. Flip its <code>green</code> flag in
+    <code>TYPES</code> to change that.<br>
+    ** Other Power is hydro + bio-CHP; Ned describes it as renewable, so it counts as green.<br>
+    *** Electricity Mix is an emission factor, not a generation volume, so it is excluded from the green/non-green sum.
+  </p>
+
+  <h2>Endpoints</h2>
+  <table>
+    <thead><tr><th>Route</th><th>Returns</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /api/forecast</code></td><td>Forecast mix (Ned classification 1), as JSON.</td></tr>
+      <tr><td><code>GET /api/forecast.csv</code></td><td>The same data as CSV.</td></tr>
+      <tr><td><code>GET /api/realized</code></td><td>Realized / actuals (Ned classification 2), as JSON.</td></tr>
+      <tr><td><code>GET /api/realized.csv</code></td><td>The same data as CSV.</td></tr>
+      <tr><td><code>GET /api/greenmix</code></td><td>Per-slot green vs non-green split. Add <code>?source=forecast</code> or <code>?source=realized</code> (default forecast).</td></tr>
+      <tr><td><code>GET /api/greenmix.csv</code></td><td>The same split as CSV.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Query parameters</h2>
+  <p>Add these after a <code>?</code>, joined with <code>&amp;</code>. They work on every data route.</p>
+  <table>
+    <thead><tr><th>Parameter</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><code>from=ISO</code></td><td>Only rows at/after this UTC time, e.g. <code>2026-05-01T00:00:00Z</code>.</td></tr>
+      <tr><td><code>to=ISO</code></td><td>Only rows strictly before this UTC time.</td></tr>
+      <tr><td><code>all=1</code></td><td>Return the entire history (overrides the default window).</td></tr>
+      <tr><td><code>limit=N</code></td><td>Cap the number of rows (maximum 100000).</td></tr>
+      <tr><td><code>type=1,2,20</code></td><td>Only these generation type IDs.</td></tr>
+    </tbody>
+  </table>
+  <p>With no parameters you get the <strong>last 14 days</strong>. Give times as UTC, ending in <code>Z</code>, to match <code>ts_utc</code> — that is always the correct sort and range key. <code>ts_local</code> carries +01:00/+02:00 offsets and is for display only.</p>
+
+  <h2>Try it</h2>
+  <ul>
+    <li><a href="/api/forecast">/api/forecast</a> — forecast, last 14 days</li>
+    <li><a href="/api/realized">/api/realized</a> — actuals, last 14 days</li>
+    <li><a href="/api/greenmix">/api/greenmix</a> — green vs non-green split</li>
+    <li><a href="/api/forecast?type=1,2,17,22,51">/api/forecast?type=1,2,17,22,51</a> — wind &amp; solar only</li>
+    <li><a href="/api/greenmix.csv?all=1">/api/greenmix.csv?all=1</a> — full split as CSV</li>
+  </ul>
+
+  <h2>Using it from code</h2>
+  <pre><code>const res = await fetch("/api/greenmix?source=forecast");
+const mix = await res.json();
+// mix[0] -> { ts_utc, ts_local, green_kwh, nongreen_kwh, total_kwh, green_share }
+
+// e.g. the green share of the most recent slot, as a percentage
+const latest = mix[mix.length - 1];
+console.log(Math.round(latest.green_share * 100) + "% green");</code></pre>
+  <p class="note">Responses are cached for 15 minutes. Data is collected from Ned.nl twice a day,
+  with a wider monthly sweep that overwrites still-provisional realized values.</p>
+
+  <footer>Greenmix · read-only generation-mix API · data from Ned.nl</footer>
+</main>
+</body>
+</html>`;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -322,6 +500,12 @@ export default {
     try {
       if (p === "/" || p === "") {
         return new Response(HELP, { headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
+
+      if (p === "/docs") {
+        return new Response(docsHtml(), {
+          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "max-age=900" },
+        });
       }
 
       if (p === "/api/forecast")      return json(await queryRows(env, "forecast", q));
@@ -352,7 +536,7 @@ export default {
         return json({ ok: true, ran: out });
       }
 
-      return json({ error: "not found", help: "/" }, 404);
+      return json({ error: "not found", help: "/docs" }, 404);
     } catch (e) {
       return json({ error: e.message }, 500);
     }
