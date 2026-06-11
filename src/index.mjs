@@ -317,14 +317,22 @@ async function queryCompare(env, params) {
 }
 
 // --- response formatting ----------------------------------------------------
+// Public read-only API: allow any origin so the charts on metermonitor.nl,
+// k2laden.nl, etc. can fetch it from the browser.
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, OPTIONS",
+  "access-control-allow-headers": "*",
+};
+
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "max-age=900" },
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "max-age=900", ...CORS },
   });
 
 function csv(rows) {
-  if (!rows.length) return new Response("", { headers: { "content-type": "text/csv; charset=utf-8" } });
+  if (!rows.length) return new Response("", { headers: { "content-type": "text/csv; charset=utf-8", ...CORS } });
   const cols = Object.keys(rows[0]);
   const esc = (v) => {
     if (v === null || v === undefined) return "";
@@ -333,7 +341,7 @@ function csv(rows) {
   };
   const body = [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
   return new Response(body, {
-    headers: { "content-type": "text/csv; charset=utf-8", "cache-control": "max-age=900" },
+    headers: { "content-type": "text/csv; charset=utf-8", "cache-control": "max-age=900", ...CORS },
   });
 }
 
@@ -370,6 +378,7 @@ const HELP = `Greenmix (Ned.nl) — read-only API
 
 export default {
   async fetch(request, env) {
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     const url = new URL(request.url);
     // Collapse repeated slashes and strip a trailing slash so /api/forecast/
     // and //api/refresh route the same as the canonical paths.
@@ -378,7 +387,7 @@ export default {
 
     try {
       if (p === "/" || p === "") {
-        return new Response(HELP, { headers: { "content-type": "text/plain; charset=utf-8" } });
+        return new Response(HELP, { headers: { "content-type": "text/plain; charset=utf-8", ...CORS } });
       }
 
       if (p === "/api/forecast")      return json(await queryRows(env, "forecast", q));
