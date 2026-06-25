@@ -12,9 +12,23 @@
 //   forecast  = Ned classification 1  -> table greenmix_forecast
 //   realized  = Ned classification 2  -> table greenmix_realized
 //
-// Secrets (Worker -> Settings -> Variables and Secrets):
-//   NED_API_KEY     your Ned.nl X-AUTH-TOKEN
-//   REFRESH_TOKEN   any long random string; protects /api/refresh
+// Observability:
+//   - Every collector run (cron OR manual), per source, writes one row to
+//     `run_log`: trigger, source, rows written, min/max ts_utc captured,
+//     per-type counts (note), errors and duration. Query it to see WHICH cron
+//     actually captured tomorrow's data:
+//       SELECT ran_at, trigger, source, written, range_last, error
+//       FROM run_log ORDER BY id DESC LIMIT 50;
+//   - On a failed run (a type returned a real HTTP error) it emails an alert
+//     via Resend, IF the optional RESEND_API_KEY secret is set. An empty type
+//     (no data for the window) is NOT an error and does NOT email.
+//
+// Secrets / vars (Worker -> Settings -> Variables and Secrets):
+//   NED_API_KEY     required, your Ned.nl X-AUTH-TOKEN
+//   REFRESH_TOKEN   required, protects /api/refresh
+//   RESEND_API_KEY  optional, enables error-alert emails
+//   ALERT_TO        optional, default info@vvelaadoplossing.nl
+//   ALERT_FROM      optional, default monitor@vvelaadoplossing.nl
 // ----------------------------------------------------------------------------
 
 // --- Type catalogue ---------------------------------------------------------
@@ -80,10 +94,17 @@ const ymd = (d) => new Date(d).toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 // Platform: ld+json responses carry hydra:member + hydra:view.hydra:next, so
 // we page until there is no next link. itemsPerPage keeps the page count (and
 // thus request count) low and well under Ned's 200-requests / 5-minutes limit.
+//
+// Error handling (hardened): a 429 is retried (capped), a 404 is treated as a
+// legitimately-empty type, and ANY other non-2xx THROWS - so a real failure
+// (401 bad key, 400 bad combo, 5xx) surfaces as a recorded per-type error and
+// an alert, instead of silently looking like "no data".
 async function fetchType(env, typeId, classification, fromDate, toDate) {
   const members = [];
   let page = 1;
+  let throttleRetries = 0;
   const MAX_PAGES = 50;
+  const MAX_THROTTLE_RETRIES = 5;
   while (page <= MAX_PAGES) {
     const url = new URL("https://api.ned.nl/v1/utilizations");
     url.searchParams.set("point", "0");                 // Netherlands
@@ -104,8 +125,27 @@ async function fetchType(env, typeId, classification, fromDate, toDate) {
       headers: { "X-AUTH-TOKEN": env.NED_API_KEY, Accept: "application/ld+json" },
     });
 
-    if (res.status === 429) { await sleep(3000); continue; } // throttled -> wait and retry
-    if (!res.ok) break;                                      // no data / bad combo -> skip type
+    if (res.status === 429) {
+      // throttled -> wait and retry the SAME page, but cap it so a stuck 429
+      // can't loop forever and hang the whole invocation.
+      if (++throttleRetries > MAX_THROTTLE_RETRIES) {
+        throw new Error(`Ned rate-limited (429) after ${MAX_THROTTLE_RETRIES} retries`);
+      }
+      await sleep(3000);
+      continue;
+    }
+
+    // 404 = no series for this type/classification/window. That is a normal
+    // "empty" outcome (e.g. forecast for an actuals-only type), not a failure.
+    if (res.status === 404) break;
+
+    if (!res.ok) {
+      // Any other non-2xx is a real error. Read a snippet for context and throw
+      // so it is recorded + alerted instead of silently swallowed.
+      let detail = "";
+      try { detail = (await res.text()).slice(0, 200); } catch { /* ignore */ }
+      throw new Error(`Ned HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+    }
 
     const body = await res.json();
     const page_members =
@@ -162,8 +202,37 @@ function upsertStmt(env, table) {
   return env.DB.prepare(sql);
 }
 
+// --- collector --------------------------------------------------------------
+
+// Public entry point per source. Times the run, records it to run_log, and
+// emails on failure. Returns the same enriched result object either way, so
+// /api/refresh output is unchanged (plus a few extra fields).
+async function fetchAndStore(env, source, opts = {}, trigger = "manual") {
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await collectSource(env, source, opts);
+  } catch (e) {
+    result = {
+      ok: false,
+      source,
+      table: source === "realized" ? "greenmix_realized" : "greenmix_forecast",
+      written: 0,
+      perType: {},
+      errors: ["unexpected: " + (e && e.message ? e.message : String(e))],
+    };
+  }
+  const durationMs = Date.now() - startedAt;
+
+  await recordRun(env, trigger, result, durationMs);
+  if (!result.ok) await sendAlert(env, trigger, result, durationMs);
+
+  return result;
+}
+
 // Collect one source ("forecast" | "realized") into its table.
-async function fetchAndStore(env, source, opts = {}) {
+// Never sends mail / writes run_log itself; just returns a result object.
+async function collectSource(env, source, opts = {}) {
   const classification = source === "realized" ? 2 : 1;
   const table = source === "realized" ? "greenmix_realized" : "greenmix_forecast";
 
@@ -180,6 +249,9 @@ async function fetchAndStore(env, source, opts = {}) {
   const stmt = upsertStmt(env, table);
   let written = 0;
   const perType = {};
+  const errors = [];
+  let firstTs = null;
+  let lastTs = null;
 
   for (const t of TYPES) {
     let recs;
@@ -187,10 +259,18 @@ async function fetchAndStore(env, source, opts = {}) {
       recs = await fetchType(env, t.id, classification, fromDate, toDate);
     } catch (e) {
       perType[t.id] = `error: ${e.message}`;
+      errors.push(`type ${t.id} (${t.name}): ${e.message}`);
       continue;
     }
     const rows = recs.map((r) => toRow(r, t.id, nowIso)).filter(Boolean);
     perType[t.id] = rows.length;
+
+    // Track the actual data range captured this run (for run_log range_*).
+    for (const row of rows) {
+      if (!row.ts_utc) continue;
+      if (firstTs === null || row.ts_utc < firstTs) firstTs = row.ts_utc;
+      if (lastTs === null || row.ts_utc > lastTs) lastTs = row.ts_utc;
+    }
 
     // Upsert in chunks (one bound statement per row; chunk the batch).
     for (let i = 0; i < rows.length; i += 100) {
@@ -205,7 +285,75 @@ async function fetchAndStore(env, source, opts = {}) {
     await sleep(250);
   }
 
-  return { source, table, window: { fromDate, toDate }, written, perType };
+  return {
+    ok: errors.length === 0,
+    source,
+    table,
+    window: { fromDate, toDate },
+    range: { first: firstTs, last: lastTs },
+    written,
+    perType,
+    errors,
+  };
+}
+
+// --- run logging + alerting -------------------------------------------------
+
+// Write one row to run_log. Never throws - a logging failure must not break a run.
+async function recordRun(env, trigger, result, durationMs) {
+  try {
+    await env.DB.prepare(
+      "INSERT INTO run_log (ran_at, trigger, source, ok, written, range_first, range_last, note, error, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      new Date().toISOString(),
+      trigger ?? null,
+      result.source ?? null,
+      result.ok ? 1 : 0,
+      result.written ?? 0,
+      result.range ? result.range.first : null,
+      result.range ? result.range.last : null,
+      result.perType ? JSON.stringify(result.perType) : null,
+      result.errors && result.errors.length ? result.errors.join("; ").slice(0, 500) : null,
+      durationMs,
+    ).run();
+  } catch (e) {
+    console.log("run_log insert failed: " + e.message);
+  }
+}
+
+// Email an alert via Resend on a failed run. No-op if RESEND_API_KEY is unset.
+async function sendAlert(env, trigger, result, durationMs) {
+  if (!env.RESEND_API_KEY) return;
+  const to = env.ALERT_TO || "info@vvelaadoplossing.nl";
+  const from = env.ALERT_FROM || "monitor@vvelaadoplossing.nl";
+  const subject = `🚨 greenmix ${result.source || ""} fetch failed (trigger: ${trigger})`;
+  const errLines =
+    result.errors && result.errors.length ? result.errors : ["(unknown)"];
+  const text = [
+    "Worker: greenmix",
+    `Source: ${result.source || "(n/a)"}`,
+    `Trigger: ${trigger}`,
+    `Time (UTC): ${new Date().toISOString()}`,
+    `Duration: ${durationMs} ms`,
+    `Rows written: ${result.written ?? 0}`,
+    `Window: ${result.window ? `${result.window.fromDate} -> ${result.window.toDate}` : "(n/a)"}`,
+    "",
+    "Errors:",
+    ...errLines,
+  ].join("\n");
+
+  try {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ from, to, subject, text }),
+    });
+  } catch (e) {
+    console.log("alert email failed: " + e.message);
+  }
 }
 
 // --- read helpers -----------------------------------------------------------
@@ -356,6 +504,7 @@ const HELP = `Greenmix (Ned.nl) — read-only API
   GET /api/compare             forecast vs realized over a window: per-type
                                volume error + green-share error. Only matched
                                timestamps. Use ?from=ISO&to=ISO.
+  GET /api/runs                recent collector run history (run_log). ?limit=N
   GET /api/refresh?token=...   run the collector now (needs REFRESH_TOKEN)
                                &days_back=N&days_fwd=N to widen the window
                                &from=YYYY-MM-DD&to=YYYY-MM-DD for an exact range
@@ -407,6 +556,14 @@ export default {
       if (p === "/api/compare")     return json(await queryCompare(env, q));
       if (p === "/api/compare.csv") return csv((await queryCompare(env, q)).per_type);
 
+      if (p === "/api/runs") {
+        const limit = Math.min(parseInt(q.get("limit") || "50", 10) || 50, 500);
+        const { results } = await env.DB.prepare(
+          "SELECT id, ran_at, trigger, source, ok, written, range_first, range_last, note, error, duration_ms FROM run_log ORDER BY id DESC LIMIT ?",
+        ).bind(limit).all();
+        return json(results || []);
+      }
+
       if (p === "/api/refresh") {
         if (!env.REFRESH_TOKEN || q.get("token") !== env.REFRESH_TOKEN) {
           return json({ error: "unauthorized" }, 401);
@@ -418,8 +575,8 @@ export default {
         if (q.get("to")) opts.toDate = q.get("to");       // YYYY-MM-DD; overrides days_fwd
         const which = q.get("source") || "both";
         const out = [];
-        if (which === "both" || which === "forecast") out.push(await fetchAndStore(env, "forecast", opts));
-        if (which === "both" || which === "realized") out.push(await fetchAndStore(env, "realized", opts));
+        if (which === "both" || which === "forecast") out.push(await fetchAndStore(env, "forecast", opts, "manual"));
+        if (which === "both" || which === "realized") out.push(await fetchAndStore(env, "realized", opts, "manual"));
         return json({ ok: true, ran: out });
       }
 
@@ -434,13 +591,17 @@ export default {
   // :00 triggers -> forecast, :30 triggers -> realized, monthly -> deep
   // realized sweep (~32 days back) to overwrite any values that were still
   // provisional within Ned's revision windows.
+  //
+  // AWAIT (not waitUntil): the scheduled handler must stay alive until the
+  // fetch + D1 writes complete, or the runtime tears the work down silently.
+  // The cron string is passed as the trigger so run_log shows which one fired.
   async scheduled(event, env, ctx) {
     if (event.cron === "0 12 1 * *") {
-     await fetchAndStore(env, "realized", { daysBack: 32, daysFwd: 1 });
+      await fetchAndStore(env, "realized", { daysBack: 32, daysFwd: 1 }, event.cron);
       return;
     }
     const realizedCrons = ["30 13 * * *", "30 18 * * *"];
     const source = realizedCrons.includes(event.cron) ? "realized" : "forecast";
-    await fetchAndStore(env, source);
+    await fetchAndStore(env, source, {}, event.cron);
   },
 };
